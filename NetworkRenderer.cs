@@ -1,6 +1,6 @@
 using System.Numerics;
 
-namespace NeuralNet3D;
+namespace Makarov.NeuralNet3D;
 
 internal sealed class NetworkRenderer
 {
@@ -33,7 +33,7 @@ internal sealed class NetworkRenderer
     public NetworkRenderer(NeuralNetwork net)
     {
         _net = net;
-        int L = net.Sizes.Length;
+        int L = net.sizes.Length;
         _pos = new Vector3[L][];
         _norm = new double[L][];
         _radius = new float[L];
@@ -43,20 +43,35 @@ internal sealed class NetworkRenderer
 
     private void BuildLayout()
     {
-        int L = _net.Sizes.Length;
+        int L = _net.sizes.Length;
         float[] layerX = new float[L];
-
-        for (int l = 0; l < L; l++) 
-            layerX[l] = -9f + 18f * (L == 1 ? 0 : (float)l / (L - 1));
 
         for (int l = 0; l < L; l++)
         {
-            int n = _net.Sizes[l];
-            _norm[l] = new double[n];
+            layerX[l] = -9f + 18f * (L == 1 ? 0 : (float)l / (L - 1));
+        }
 
-            int cols; float sp;
-            if (l == 0) { cols = 28; sp = 0.30f; _radius[l] = 0.055f; _color[l] = new[] { 0.85f, 0.95f, 1.0f }; }
-            else if (l == L - 1) { cols = 1; sp = 1.15f; _radius[l] = 0.30f; _color[l] = new[] { 0.55f, 1.0f, 0.55f }; }
+        for (int l = 0; l < L; l++)
+        {
+            int n = _net.sizes[l];
+            _norm[l] = new double[n];
+            int cols;
+            float sp;
+
+            if (l == 0)
+            {
+                cols = 28; 
+                sp = 0.30f; 
+                _radius[l] = 0.055f;
+                _color[l] = [0.85f, 0.95f, 1.0f];
+            }
+            else if (l == L - 1)
+            {
+                cols = 1; 
+                sp = 1.15f; 
+                _radius[l] = 0.30f; 
+                _color[l] = [0.55f, 1.0f, 0.55f];
+            }
             else
             {
                 cols = (int)Math.Ceiling(Math.Sqrt(n));
@@ -66,6 +81,7 @@ internal sealed class NetworkRenderer
 
             int rows = (n + cols - 1) / cols;
             _pos[l] = new Vector3[n];
+
             for (int idx = 0; idx < n; idx++)
             {
                 int r = idx / cols, c = idx % cols;
@@ -87,8 +103,6 @@ internal sealed class NetworkRenderer
         Gl.glEnable(Gl.GL_POINT_SMOOTH);
         Gl.glHint(Gl.GL_LINE_SMOOTH_HINT, Gl.GL_NICEST);
         Gl.glHint(Gl.GL_POINT_SMOOTH_HINT, Gl.GL_NICEST);
-
-        // освещение
         Gl.glEnable(Gl.GL_LIGHTING);
         Gl.glEnable(Gl.GL_LIGHT0);
         Gl.glLightfv(Gl.GL_LIGHT0, Gl.GL_POSITION, new[] { 6f, 10f, 14f, 0f });
@@ -108,12 +122,14 @@ internal sealed class NetworkRenderer
         Gl.glNewList(_sphereList, Gl.GL_COMPILE);
         const int stacks = 12, slices = 14;
         Gl.glBegin(Gl.GL_TRIANGLES);
+
         for (int i = 0; i < stacks; i++)
         {
             double lat0 = Math.PI * (-0.5 + (double)i / stacks);
             double lat1 = Math.PI * (-0.5 + (double)(i + 1) / stacks);
             double z0 = Math.Sin(lat0), zr0 = Math.Cos(lat0);
             double z1 = Math.Sin(lat1), zr1 = Math.Cos(lat1);
+
             for (int j = 0; j < slices; j++)
             {
                 double lng0 = 2 * Math.PI * ((double)j / slices);
@@ -122,6 +138,7 @@ internal sealed class NetworkRenderer
                 V(lng0, z0, zr0); V(lng1, z1, zr1); V(lng0, z1, zr1);
             }
         }
+
         Gl.glEnd();
         Gl.glEndList();
     }
@@ -139,12 +156,24 @@ internal sealed class NetworkRenderer
     {
         _winner = winner;
         double[] inp = _net.A[0];
-        var idx = new System.Collections.Generic.List<(int i, double v)>();
-        for (int i = 0; i < inp.Length; i++) if (inp[i] > 0.15) idx.Add((i, inp[i]));
+        var idx = new List<(int i, double v)>();
+
+        for (int i = 0; i < inp.Length; i++)
+        {
+            if (inp[i] > 0.15)
+            {
+                idx.Add((i, inp[i]));
+            }
+        }
+
         idx.Sort((a, b) => b.v.CompareTo(a.v));
         int take = Math.Min(60, idx.Count);
         _activePix = new int[take];
-        for (int k = 0; k < take; k++) _activePix[k] = idx[k].i;
+
+        for (int k = 0; k < take; k++)
+        {
+            _activePix[k] = idx[k].i;
+        }
     }
 
     public void StartWave() { _wave = 0f; _waveRunning = true; }
@@ -154,7 +183,7 @@ internal sealed class NetworkRenderer
         if (_waveRunning)
         {
             _wave += (float)dt * WaveSpeed;
-            float maxW = _net.Sizes.Length - 1;
+            float maxW = _net.sizes.Length - 1;
             if (_wave >= maxW + 0.05f) { _wave = maxW; _waveRunning = false; }
         }
         if (AutoRotate && !Dragging) Yaw += (float)dt * 8f;
@@ -191,26 +220,45 @@ internal sealed class NetworkRenderer
 
     private void ComputeNorm()
     {
-        int L = _net.Sizes.Length;
+        int L = _net.sizes.Length;
 
         if (!Ready)
         {
             for (int l = 0; l < L; l++)
+            {
                 Array.Clear(_norm[l], 0, _norm[l].Length);
+            }
+
             return;
         }
+
         for (int l = 0; l < L; l++)
         {
             double[] a = _net.A[l], n = _norm[l];
+
             if (l == 0 || l == L - 1)
             {
-                for (int i = 0; i < a.Length; i++) n[i] = a[i];
+                for (int i = 0; i < a.Length; i++)
+                {
+                    n[i] = a[i];
+                }
             }
             else
             {
                 double max = 1e-6;
-                for (int i = 0; i < a.Length; i++) if (a[i] > max) max = a[i];
-                for (int i = 0; i < a.Length; i++) n[i] = a[i] / max;
+
+                foreach (double t in a)
+                {
+                    if (t > max)
+                    {
+                        max = t;
+                    }
+                }
+
+                for (int i = 0; i < a.Length; i++)
+                {
+                    n[i] = a[i] / max;
+                }
             }
         }
     }
@@ -228,8 +276,8 @@ internal sealed class NetworkRenderer
     {
         Gl.glEnable(Gl.GL_LIGHTING);
         Gl.glDepthMask(1);
+        int L = _net.sizes.Length;
 
-        int L = _net.Sizes.Length;
         for (int l = 0; l < L; l++)
         {
             Vector3[] p = _pos[l];
@@ -270,6 +318,7 @@ internal sealed class NetworkRenderer
                 Gl.glPopMatrix();
             }
         }
+
         Gl.glMaterialfv(Gl.GL_FRONT_AND_BACK, Gl.GL_EMISSION, _zero4);
     }
 
@@ -281,7 +330,7 @@ internal sealed class NetworkRenderer
         Gl.glDepthMask(0);
         Gl.glLineWidth(1.1f);
 
-        int L = _net.Sizes.Length;
+        int L = _net.sizes.Length;
         const float kFull = 1.6f, kInput = 1.0f;
 
         Gl.glBegin(Gl.GL_LINES);
@@ -289,6 +338,7 @@ internal sealed class NetworkRenderer
         if (_activePix.Length > 0)
         {
             float eg = EdgeGate(0);
+
             if (eg > 0.01f)
             {
                 Vector3[] src = _pos[0], dst = _pos[1];
@@ -298,9 +348,9 @@ internal sealed class NetworkRenderer
                 {
                     double[] wj = w[j];
                     Vector3 dp = dst[j];
-                    for (int t = 0; t < _activePix.Length; t++)
+
+                    foreach (int i in _activePix)
                     {
-                        int i = _activePix[t];
                         float alpha = (float)(Math.Abs(wj[i]) * aSrc[i]) * kInput * eg;
                         if (alpha < 0.03f) continue;
                         EmitEdge(src[i], dp, wj[i], alpha);
@@ -316,10 +366,12 @@ internal sealed class NetworkRenderer
             Vector3[] src = _pos[g], dst = _pos[g + 1];
             double[] aSrc = _norm[g];
             double[][] w = _net.W[g];
+
             for (int j = 0; j < dst.Length; j++)
             {
                 double[] wj = w[j];
                 Vector3 dp = dst[j];
+
                 for (int i = 0; i < src.Length; i++)
                 {
                     float alpha = (float)(Math.Abs(wj[i]) * aSrc[i]) * kFull * eg;
@@ -328,6 +380,7 @@ internal sealed class NetworkRenderer
                 }
             }
         }
+
         Gl.glEnd();
 
         DrawPulses();
@@ -339,10 +392,14 @@ internal sealed class NetworkRenderer
 
     private static void EmitEdge(Vector3 s, Vector3 d, double weight, float alpha)
     {
-        if (weight >= 0) 
+        if (weight >= 0)
+        {
             Gl.glColor4f(0.30f, 0.70f, 1.0f, Math.Min(alpha, 0.8f));
+        }
         else
+        {
             Gl.glColor4f(1.0f, 0.45f, 0.55f, Math.Min(alpha, 0.8f));
+        }
 
         Gl.glVertex3f(s.X, s.Y, s.Z);
         Gl.glVertex3f(d.X, d.Y, d.Z);
@@ -352,7 +409,7 @@ internal sealed class NetworkRenderer
     {
         if (!_waveRunning) return;
         int gap = (int)Math.Floor(_wave);
-        int L = _net.Sizes.Length;
+        int L = _net.sizes.Length;
         if (gap < 0 || gap >= L - 1) return;
 
         float t = _wave - gap;
@@ -416,6 +473,7 @@ internal sealed class NetworkRenderer
 
         Vector3[] p = _pos[0];
         double[] a = _norm[0];
+
         for (int i = 0; i < p.Length; i++)
         {
             float v = (float)Math.Clamp(a[i], 0, 1);
@@ -434,7 +492,7 @@ internal sealed class NetworkRenderer
 
     private void DrawOutputLabels()
     {
-        int L = _net.Sizes.Length;
+        int L = _net.sizes.Length;
         Vector3[] outPos = _pos[L - 1];
         double[] probs = _net.A[L - 1];
 

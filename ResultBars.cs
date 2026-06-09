@@ -1,10 +1,5 @@
-using System;
-using System.Drawing;
-using System.Windows.Forms;
+namespace Makarov.NeuralNet3D;
 
-namespace NeuralNet3D;
-
-/// <summary>Горизонтальные бары вероятностей по цифрам 0..9 с подсветкой победителя.</summary>
 internal sealed class ResultBars : Control
 {
     private double[] _values = new double[10];

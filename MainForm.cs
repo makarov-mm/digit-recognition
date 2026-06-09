@@ -1,10 +1,11 @@
 using System.Diagnostics;
 
-namespace NeuralNet3D
+namespace Makarov.NeuralNet3D
 {
     internal sealed class MainForm : Form
     {
-        private const string WeightsPath = "mnist_synth_weights.bin";
+        private static readonly string AppDir = AppContext.BaseDirectory;
+        private static readonly string WeightsPath = Path.Combine(AppDir, "weights.bin");
 
         private readonly NeuralNetwork _net;
         private readonly NetworkRenderer _renderer;

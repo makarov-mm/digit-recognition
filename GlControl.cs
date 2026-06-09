@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace NeuralNet3D;
+namespace Makarov.NeuralNet3D;
 
 internal sealed class GlControl : Control
 {

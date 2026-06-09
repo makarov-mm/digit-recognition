@@ -2,7 +2,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 
-namespace NeuralNet3D;
+namespace Makarov.NeuralNet3D;
 
 internal static class ImageOps
 {

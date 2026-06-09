@@ -26,7 +26,7 @@ dotnet run -c Release
 
 On the **first** run the app downloads MNIST into an `mnist/` folder next to the exe,
 trains on it (≈1–3 minutes; progress and test accuracy are shown at the bottom left),
-and saves the weights to `mnist_synth_weights.bin`. After that the weights are simply
+and saves the weights to `weights.bin`. After that the weights are simply
 loaded from cache.
 
 > If there is no internet or MNIST fails to download, the app falls back to a synthetic

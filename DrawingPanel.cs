@@ -1,11 +1,7 @@
-using System;
-using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Windows.Forms;
 
-namespace NeuralNet3D;
+namespace Makarov.NeuralNet3D;
 
-/// <summary>Холст для рисования цифры мышью: чёрные чернила на белом.</summary>
 internal sealed class DrawingPanel : Control
 {
     private const int Res = 280;
@@ -15,7 +11,6 @@ internal sealed class DrawingPanel : Control
     private bool _drawing;
     private Point _last;
 
-    /// <summary>Вызывается, когда штрих завершён (отпустили кнопку мыши).</summary>
     public event Action StrokeEnded;
 
     public DrawingPanel()
@@ -33,7 +28,6 @@ internal sealed class DrawingPanel : Control
         Invalidate();
     }
 
-    /// <summary>Копия холста — отдаём в препроцессинг.</summary>
     public Bitmap Snapshot() => (Bitmap)_bmp.Clone();
 
     private Point ToBitmap(Point p)

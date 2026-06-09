@@ -1,6 +1,6 @@
 using System.IO.Compression;
 
-namespace NeuralNet3D;
+namespace Makarov.NeuralNet3D;
 
 internal static class MnistLoader
 {

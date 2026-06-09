@@ -1,4 +1,4 @@
-namespace NeuralNet3D;
+namespace Makarov.NeuralNet3D;
 
 internal static class Program
 {
