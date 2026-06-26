@@ -31,3 +31,9 @@ loaded from cache.
 
 > If there is no internet or MNIST fails to download, the app falls back to a synthetic
 > dataset (digits rendered with system fonts).
+
+## Support
+
+If you found this project interesting or useful, you can support my work:
+
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/makarov-mm?style=flat&logo=github)](https://github.com/sponsors/makarov-mm)
