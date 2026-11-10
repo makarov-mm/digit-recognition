@@ -1,18 +1,21 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+
+// Every P/Invoke below is source-generated (LibraryImport); nothing is marshalled at run time.
+[assembly: DisableRuntimeMarshalling]
 
 namespace Makarov.NeuralNet3D;
 
-internal static class Gl
+// The OpenGL 1.1 (fixed-function) calls the viewer uses, straight from opengl32.dll.
+internal static partial class Gl
 {
-    private const string OPENGL = "opengl32.dll";
-    private const string GDI = "gdi32.dll";
-    private const string USER = "user32.dll";
+    private const string Library = "opengl32.dll";
 
     public const uint GL_POINTS = 0x0000;
     public const uint GL_LINES = 0x0001;
     public const uint GL_TRIANGLES = 0x0004;
-    public const uint GL_DEPTH_BUFFER_BIT = 0x00000100;
-    public const uint GL_COLOR_BUFFER_BIT = 0x00004000;
+    public const uint GL_DEPTH_BUFFER_BIT = 0x0100;
+    public const uint GL_COLOR_BUFFER_BIT = 0x4000;
     public const uint GL_LEQUAL = 0x0203;
     public const uint GL_SMOOTH = 0x1D01;
     public const uint GL_MODELVIEW = 0x1700;
@@ -27,6 +30,7 @@ internal static class Gl
     public const uint GL_COLOR_MATERIAL = 0x0B57;
     public const uint GL_FRONT_AND_BACK = 0x0408;
     public const uint GL_AMBIENT_AND_DIFFUSE = 0x1602;
+    public const uint GL_LIGHT_MODEL_AMBIENT = 0x0B53;
     public const uint GL_BLEND = 0x0BE2;
     public const uint GL_SRC_ALPHA = 0x0302;
     public const uint GL_ONE = 0x0001;
@@ -37,55 +41,73 @@ internal static class Gl
     public const uint GL_POINT_SMOOTH_HINT = 0x0C51;
     public const uint GL_NICEST = 0x1102;
     public const uint GL_COMPILE = 0x1300;
-    public const uint GL_LIGHT_MODEL_AMBIENT = 0x0B53;
-    public const uint PFD_DRAW_TO_WINDOW = 0x00000004;
-    public const uint PFD_SUPPORT_OPENGL = 0x00000020;
-    public const uint PFD_DOUBLEBUFFER = 0x00000001;
 
-    [DllImport(OPENGL)] public static extern void glClear(uint mask);
-    [DllImport(OPENGL)] public static extern void glClearColor(float r, float g, float b, float a);
-    [DllImport(OPENGL)] public static extern void glEnable(uint cap);
-    [DllImport(OPENGL)] public static extern void glDisable(uint cap);
-    [DllImport(OPENGL)] public static extern void glBegin(uint mode);
-    [DllImport(OPENGL)] public static extern void glEnd();
-    [DllImport(OPENGL)] public static extern void glVertex3f(float x, float y, float z);
-    [DllImport(OPENGL)] public static extern void glColor3f(float r, float g, float b);
-    [DllImport(OPENGL)] public static extern void glColor4f(float r, float g, float b, float a);
-    [DllImport(OPENGL)] public static extern void glNormal3f(float x, float y, float z);
-    [DllImport(OPENGL)] public static extern void glMatrixMode(uint mode);
-    [DllImport(OPENGL)] public static extern void glLoadIdentity();
-    [DllImport(OPENGL)] public static extern void glPushMatrix();
-    [DllImport(OPENGL)] public static extern void glPopMatrix();
-    [DllImport(OPENGL)] public static extern void glTranslatef(float x, float y, float z);
-    [DllImport(OPENGL)] public static extern void glRotatef(float angle, float x, float y, float z);
-    [DllImport(OPENGL)] public static extern void glScalef(float x, float y, float z);
-    [DllImport(OPENGL)] public static extern void glViewport(int x, int y, int width, int height);
-    [DllImport(OPENGL)] public static extern void glFrustum(double l, double r, double b, double t, double n, double f);
-    [DllImport(OPENGL)] public static extern void glDepthFunc(uint func);
-    [DllImport(OPENGL)] public static extern void glDepthMask(byte flag);
-    [DllImport(OPENGL)] public static extern void glShadeModel(uint mode);
-    [DllImport(OPENGL)] public static extern void glBlendFunc(uint sfactor, uint dfactor);
-    [DllImport(OPENGL)] public static extern void glLineWidth(float width);
-    [DllImport(OPENGL)] public static extern void glPointSize(float size);
-    [DllImport(OPENGL)] public static extern void glHint(uint target, uint mode);
-    [DllImport(OPENGL)] public static extern void glFlush();
-    [DllImport(OPENGL)] public static extern void glLightfv(uint light, uint pname, float[] p);
-    [DllImport(OPENGL)] public static extern void glLightModelfv(uint pname, float[] p);
-    [DllImport(OPENGL)] public static extern void glMaterialfv(uint face, uint pname, float[] p);
-    [DllImport(OPENGL)] public static extern void glMaterialf(uint face, uint pname, float param);
-    [DllImport(OPENGL)] public static extern void glColorMaterial(uint face, uint mode);
-    [DllImport(OPENGL)] public static extern uint glGenLists(int range);
-    [DllImport(OPENGL)] public static extern void glNewList(uint list, uint mode);
-    [DllImport(OPENGL)] public static extern void glEndList();
-    [DllImport(OPENGL)] public static extern void glCallList(uint list);
-    [DllImport(OPENGL)] public static extern IntPtr wglCreateContext(IntPtr hdc);
-    [DllImport(OPENGL)] public static extern bool wglMakeCurrent(IntPtr hdc, IntPtr hglrc);
-    [DllImport(OPENGL)] public static extern bool wglDeleteContext(IntPtr hglrc);
-    [DllImport(GDI)] public static extern int ChoosePixelFormat(IntPtr hdc, ref PIXELFORMATDESCRIPTOR pfd);
-    [DllImport(GDI)] public static extern bool SetPixelFormat(IntPtr hdc, int format, ref PIXELFORMATDESCRIPTOR pfd);
-    [DllImport(GDI)] public static extern bool SwapBuffers(IntPtr hdc);
-    [DllImport(USER)] public static extern IntPtr GetDC(IntPtr hWnd);
-    [DllImport(USER)] public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [LibraryImport(Library)] public static partial void glClear(uint mask);
+    [LibraryImport(Library)] public static partial void glClearColor(float red, float green, float blue, float alpha);
+    [LibraryImport(Library)] public static partial void glEnable(uint capability);
+    [LibraryImport(Library)] public static partial void glDisable(uint capability);
+    [LibraryImport(Library)] public static partial void glBegin(uint mode);
+    [LibraryImport(Library)] public static partial void glEnd();
+    [LibraryImport(Library)] public static partial void glVertex3f(float x, float y, float z);
+    [LibraryImport(Library)] public static partial void glNormal3f(float x, float y, float z);
+    [LibraryImport(Library)] public static partial void glColor4f(float red, float green, float blue, float alpha);
+    [LibraryImport(Library)] public static partial void glMatrixMode(uint mode);
+    [LibraryImport(Library)] public static partial void glLoadIdentity();
+    [LibraryImport(Library)] public static partial void glPushMatrix();
+    [LibraryImport(Library)] public static partial void glPopMatrix();
+    [LibraryImport(Library)] public static partial void glTranslatef(float x, float y, float z);
+    [LibraryImport(Library)] public static partial void glRotatef(float angle, float x, float y, float z);
+    [LibraryImport(Library)] public static partial void glScalef(float x, float y, float z);
+    [LibraryImport(Library)] public static partial void glViewport(int x, int y, int width, int height);
+    [LibraryImport(Library)] public static partial void glFrustum(double left, double right, double bottom, double top, double near, double far);
+    [LibraryImport(Library)] public static partial void glDepthFunc(uint function);
+    [LibraryImport(Library)] public static partial void glDepthMask([MarshalAs(UnmanagedType.U1)] bool write);
+    [LibraryImport(Library)] public static partial void glShadeModel(uint mode);
+    [LibraryImport(Library)] public static partial void glBlendFunc(uint source, uint destination);
+    [LibraryImport(Library)] public static partial void glLineWidth(float width);
+    [LibraryImport(Library)] public static partial void glPointSize(float size);
+    [LibraryImport(Library)] public static partial void glHint(uint target, uint mode);
+    [LibraryImport(Library)] public static partial void glLightfv(uint light, uint parameter, ReadOnlySpan<float> values);
+    [LibraryImport(Library)] public static partial void glLightModelfv(uint parameter, ReadOnlySpan<float> values);
+    [LibraryImport(Library)] public static partial void glMaterialfv(uint face, uint parameter, ReadOnlySpan<float> values);
+    [LibraryImport(Library)] public static partial void glColorMaterial(uint face, uint mode);
+    [LibraryImport(Library)] public static partial uint glGenLists(int range);
+    [LibraryImport(Library)] public static partial void glNewList(uint list, uint mode);
+    [LibraryImport(Library)] public static partial void glEndList();
+    [LibraryImport(Library)] public static partial void glCallList(uint list);
+}
+
+// Window-system side: a pixel format and a WGL context on a window's device context.
+internal static partial class Wgl
+{
+    public const uint PFD_DOUBLEBUFFER = 0x0001;
+    public const uint PFD_DRAW_TO_WINDOW = 0x0004;
+    public const uint PFD_SUPPORT_OPENGL = 0x0020;
+    public const byte PFD_TYPE_RGBA = 0;
+    public const byte PFD_MAIN_PLANE = 0;
+
+    [LibraryImport("opengl32.dll")] public static partial nint wglCreateContext(nint dc);
+
+    [LibraryImport("opengl32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool wglMakeCurrent(nint dc, nint context);
+
+    [LibraryImport("opengl32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool wglDeleteContext(nint context);
+
+    [LibraryImport("gdi32.dll")] public static partial int ChoosePixelFormat(nint dc, in PIXELFORMATDESCRIPTOR descriptor);
+
+    [LibraryImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool SetPixelFormat(nint dc, int format, in PIXELFORMATDESCRIPTOR descriptor);
+
+    [LibraryImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool SwapBuffers(nint dc);
+
+    [LibraryImport("user32.dll")] public static partial nint GetDC(nint window);
+    [LibraryImport("user32.dll")] public static partial int ReleaseDC(nint window, nint dc);
 }
 
 [StructLayout(LayoutKind.Sequential)]

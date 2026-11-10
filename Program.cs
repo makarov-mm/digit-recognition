@@ -5,9 +5,8 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
-        Application.SetHighDpiMode(HighDpiMode.SystemAware);
-        Application.EnableVisualStyles();
-        Application.SetCompatibleTextRenderingDefault(false);
+        // Visual styles, text rendering and DPI awareness (per-monitor v2) from the project file.
+        ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
     }
 }

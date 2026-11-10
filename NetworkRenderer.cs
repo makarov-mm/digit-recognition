@@ -2,553 +2,445 @@ using System.Numerics;
 
 namespace Makarov.NeuralNet3D;
 
+// Draws the network in 3D with fixed-function OpenGL 1.1: neurons as lit spheres, the
+// input digit as glowing pixels, the strongest connections as additive lines, a wave of
+// activation running through the layers after each recognition, and 7-segment labels
+// at the outputs.
 internal sealed class NetworkRenderer
 {
-    private readonly NeuralNetwork _net;
-    private readonly Vector3[][] _pos;
+    private const float WaveSpeed = 1.7f;        // layers per second
+    private const float AutoRotateSpeed = 8f;    // degrees per second
+    private const int MaxInputConnections = 60;  // input pixels drawn with their connections
+    private const int MaxPulses = 400;
+
+    private static readonly Vector3 Gold = new(1.0f, 0.84f, 0.2f);
+    private static readonly Vector3 PositiveColor = new(0.30f, 0.70f, 1.0f);
+    private static readonly Vector3 NegativeColor = new(1.0f, 0.45f, 0.55f);
+    private static readonly Vector3 LabelColor = new(0.55f, 0.85f, 1.0f);
+    private static readonly float[] LightPosition = [6f, 10f, 14f, 0f];  // directional, fixed to the camera
+    private static readonly float[] LightDiffuse = [0.9f, 0.9f, 0.9f, 1f];
+    private static readonly float[] LightAmbient = [0.18f, 0.18f, 0.22f, 1f];
+    private static readonly float[] SceneAmbient = [0.12f, 0.12f, 0.15f, 1f];
+
+    // 7-segment glyphs: segments a..g as lines in a unit box (x right, y up), and per digit
+    // a mask with bit 6 = a ... bit 0 = g.
+    private static readonly (float X0, float Y0, float X1, float Y1)[] SegmentLines =
+    [
+        (0, 1, 1, 1), (1, 1, 1, 0.5f), (1, 0.5f, 1, 0), (0, 0, 1, 0), (0, 0.5f, 0, 0), (0, 1, 0, 0.5f), (0, 0.5f, 1, 0.5f),
+    ];
+    private static readonly byte[] DigitSegments =
+        [0b1111110, 0b0110000, 0b1101101, 0b1111001, 0b0110011, 0b1011011, 0b1011111, 0b1110000, 0b1111111, 0b1111011];
+
+    private readonly NeuralNetwork _network;
+    private readonly Vector3[][] _positions;
+    private readonly int[][] _allNeurons;  // 0..n-1 per layer
     private readonly float[] _radius;
-    private readonly float[][] _color;
-    private readonly double[][] _norm;
+    private readonly Vector3[] _color;
+    private readonly float[][] _levels;    // what each neuron shows, 0..1, from the last result
+    private readonly float[] _emission = new float[4];
     private uint _sphereList;
-    private bool _glReady;
-    private readonly float[] _emis = new float[4];
-    private readonly float[] _zero4 = { 0, 0, 0, 1 };
-    public float Yaw = -25f, Pitch = -12f, Distance = 30f;
-    public bool Dragging;
-    public bool AutoRotate = true;
+    private int[] _activeInputs = [];
     private int _winner = -1;
-    private int[] _activePix = Array.Empty<int>();
+    private bool _hasResult;
     private float _wave;
     private bool _waveRunning;
-    private const float WaveSpeed = 1.7f;
 
-    public bool Ready { get; set; }
-
-    private static readonly string[] SegOn =
-    [
-        "1111110", "0110000", "1101101", "1111001", "0110011",
-        "1011011", "1011111", "1110000", "1111111", "1111011"
-    ];
-
-    public NetworkRenderer(NeuralNetwork net)
+    public NetworkRenderer(NeuralNetwork network)
     {
-        _net = net;
-        int L = net.sizes.Length;
-        _pos = new Vector3[L][];
-        _norm = new double[L][];
-        _radius = new float[L];
-        _color = new float[L][];
+        _network = network;
+        int layers = network.LayerCount;
+        _positions = new Vector3[layers][];
+        _allNeurons = new int[layers][];
+        _levels = new float[layers][];
+        _radius = new float[layers];
+        _color = new Vector3[layers];
         BuildLayout();
     }
 
-    private void BuildLayout()
+    public float Yaw { get; private set; } = -25f;
+    public float Pitch { get; private set; } = -12f;
+    public float Distance { get; private set; } = 30f;
+    public bool AutoRotate { get; set; } = true;
+
+    public void Rotate(float yawDegrees, float pitchDegrees)
     {
-        int L = _net.sizes.Length;
-        float[] layerX = new float[L];
-
-        for (int l = 0; l < L; l++)
-        {
-            layerX[l] = -9f + 18f * (L == 1 ? 0 : (float)l / (L - 1));
-        }
-
-        for (int l = 0; l < L; l++)
-        {
-            int n = _net.sizes[l];
-            _norm[l] = new double[n];
-            int cols;
-            float sp;
-
-            if (l == 0)
-            {
-                cols = 28; 
-                sp = 0.30f; 
-                _radius[l] = 0.055f;
-                _color[l] = [0.85f, 0.95f, 1.0f];
-            }
-            else if (l == L - 1)
-            {
-                cols = 1; 
-                sp = 1.15f; 
-                _radius[l] = 0.30f; 
-                _color[l] = [0.55f, 1.0f, 0.55f];
-            }
-            else
-            {
-                cols = (int)Math.Ceiling(Math.Sqrt(n));
-                sp = 0.95f; _radius[l] = 0.17f;
-                _color[l] = l == 1 ? [0.25f, 0.9f, 0.85f] : [0.45f, 0.65f, 1.0f];
-            }
-
-            int rows = (n + cols - 1) / cols;
-            _pos[l] = new Vector3[n];
-
-            for (int idx = 0; idx < n; idx++)
-            {
-                int r = idx / cols, c = idx % cols;
-                float y = ((rows - 1) / 2f - r) * sp;
-                float z = (c - (cols - 1) / 2f) * sp;
-                _pos[l][idx] = new Vector3(layerX[l], y, z);
-            }
-        }
+        Yaw = (Yaw + yawDegrees) % 360f;
+        Pitch = Math.Clamp(Pitch + pitchDegrees, -89f, 89f);
     }
 
+    public void Zoom(float delta) => Distance = Math.Clamp(Distance - delta, 12f, 70f);
+
+    // Shows the network's current activations (after Forward) with `winner` highlighted,
+    // and sends a wave through the layers.
+    public void ShowResult(int winner)
+    {
+        int outputLayer = _levels.Length - 1;
+        for (int l = 0; l < _levels.Length; l++)
+        {
+            ReadOnlySpan<float> activations = _network.Activations(l);
+            if (l == 0 || l == outputLayer)
+            {
+                activations.CopyTo(_levels[l]);  // pixels and probabilities are already in [0, 1]
+                continue;
+            }
+            float max = 1e-6f;
+            foreach (float a in activations)
+                max = MathF.Max(max, a);
+            for (int i = 0; i < activations.Length; i++)
+                _levels[l][i] = activations[i] / max;
+        }
+
+        _activeInputs =
+        [
+            .. Enumerable.Range(0, _levels[0].Length)
+                .Where(i => _levels[0][i] > 0.15f)
+                .OrderByDescending(i => _levels[0][i])
+                .Take(MaxInputConnections),
+        ];
+        _winner = winner;
+        _hasResult = true;
+        _wave = 0f;
+        _waveRunning = true;
+    }
+
+    public void ClearResult()
+    {
+        foreach (float[] levels in _levels)
+            Array.Clear(levels);
+        _activeInputs = [];
+        _winner = -1;
+        _hasResult = false;
+        _wave = 0f;
+        _waveRunning = false;
+    }
+
+    public void Update(double seconds)
+    {
+        float dt = (float)seconds;
+        if (_waveRunning)
+        {
+            _wave += dt * WaveSpeed;
+            float end = _positions.Length - 1;
+            if (_wave >= end + 0.05f)
+            {
+                _wave = end;
+                _waveRunning = false;
+            }
+        }
+        if (AutoRotate)
+            Yaw = (Yaw + dt * AutoRotateSpeed) % 360f;
+    }
+
+    // Needs the GL context current; call again for a new context.
     public void InitGl()
     {
         Gl.glClearColor(0.04f, 0.05f, 0.09f, 1f);
         Gl.glEnable(Gl.GL_DEPTH_TEST);
         Gl.glDepthFunc(Gl.GL_LEQUAL);
         Gl.glShadeModel(Gl.GL_SMOOTH);
-        Gl.glEnable(Gl.GL_NORMALIZE);
+        Gl.glEnable(Gl.GL_NORMALIZE);  // spheres are scaled
         Gl.glEnable(Gl.GL_LINE_SMOOTH);
         Gl.glEnable(Gl.GL_POINT_SMOOTH);
         Gl.glHint(Gl.GL_LINE_SMOOTH_HINT, Gl.GL_NICEST);
         Gl.glHint(Gl.GL_POINT_SMOOTH_HINT, Gl.GL_NICEST);
         Gl.glEnable(Gl.GL_LIGHTING);
         Gl.glEnable(Gl.GL_LIGHT0);
-        Gl.glLightfv(Gl.GL_LIGHT0, Gl.GL_POSITION, new[] { 6f, 10f, 14f, 0f });
-        Gl.glLightfv(Gl.GL_LIGHT0, Gl.GL_DIFFUSE, new[] { 0.9f, 0.9f, 0.9f, 1f });
-        Gl.glLightfv(Gl.GL_LIGHT0, Gl.GL_AMBIENT, new[] { 0.18f, 0.18f, 0.22f, 1f });
-        Gl.glLightModelfv(Gl.GL_LIGHT_MODEL_AMBIENT, new[] { 0.12f, 0.12f, 0.15f, 1f });
+        Gl.glMatrixMode(Gl.GL_MODELVIEW);
+        Gl.glLoadIdentity();
+        Gl.glLightfv(Gl.GL_LIGHT0, Gl.GL_POSITION, LightPosition);
+        Gl.glLightfv(Gl.GL_LIGHT0, Gl.GL_DIFFUSE, LightDiffuse);
+        Gl.glLightfv(Gl.GL_LIGHT0, Gl.GL_AMBIENT, LightAmbient);
+        Gl.glLightModelfv(Gl.GL_LIGHT_MODEL_AMBIENT, SceneAmbient);
         Gl.glEnable(Gl.GL_COLOR_MATERIAL);
         Gl.glColorMaterial(Gl.GL_FRONT_AND_BACK, Gl.GL_AMBIENT_AND_DIFFUSE);
-
-        BuildSphereList();
-        _glReady = true;
+        _sphereList = BuildSphereList();
     }
 
-    private void BuildSphereList()
+    // pixelScale: device pixels per 96-DPI pixel, for line widths and point sizes.
+    public void Render(int width, int height, float pixelScale)
     {
-        _sphereList = Gl.glGenLists(1);
-        Gl.glNewList(_sphereList, Gl.GL_COMPILE);
-        const int stacks = 12, slices = 14;
-        Gl.glBegin(Gl.GL_TRIANGLES);
+        if (_sphereList == 0 || width <= 0 || height <= 0) return;
 
-        for (int i = 0; i < stacks; i++)
-        {
-            double lat0 = Math.PI * (-0.5 + (double)i / stacks);
-            double lat1 = Math.PI * (-0.5 + (double)(i + 1) / stacks);
-            double z0 = Math.Sin(lat0), zr0 = Math.Cos(lat0);
-            double z1 = Math.Sin(lat1), zr1 = Math.Cos(lat1);
-
-            for (int j = 0; j < slices; j++)
-            {
-                double lng0 = 2 * Math.PI * ((double)j / slices);
-                double lng1 = 2 * Math.PI * ((double)(j + 1) / slices);
-                V(lng0, z0, zr0); V(lng1, z0, zr0); V(lng1, z1, zr1);
-                V(lng0, z0, zr0); V(lng1, z1, zr1); V(lng0, z1, zr1);
-            }
-        }
-
-        Gl.glEnd();
-        Gl.glEndList();
-    }
-
-    private static void V(double lng, double z, double zr)
-    {
-        float x = (float)(Math.Cos(lng) * zr);
-        float y = (float)(Math.Sin(lng) * zr);
-        float zz = (float)z;
-        Gl.glNormal3f(x, y, zz);
-        Gl.glVertex3f(x, y, zz);
-    }
-
-    public void SetResult(double[] probs, int winner)
-    {
-        _winner = winner;
-        double[] inp = _net.A[0];
-        var idx = new List<(int i, double v)>();
-
-        for (int i = 0; i < inp.Length; i++)
-        {
-            if (inp[i] > 0.15)
-            {
-                idx.Add((i, inp[i]));
-            }
-        }
-
-        idx.Sort((a, b) => b.v.CompareTo(a.v));
-        int take = Math.Min(60, idx.Count);
-        _activePix = new int[take];
-
-        for (int k = 0; k < take; k++)
-        {
-            _activePix[k] = idx[k].i;
-        }
-    }
-
-    public void StartWave() { _wave = 0f; _waveRunning = true; }
-
-    public void Update(double dt)
-    {
-        if (_waveRunning)
-        {
-            _wave += (float)dt * WaveSpeed;
-            float maxW = _net.sizes.Length - 1;
-            if (_wave >= maxW + 0.05f) { _wave = maxW; _waveRunning = false; }
-        }
-        if (AutoRotate && !Dragging) Yaw += (float)dt * 8f;
-    }
-
-    public void Render(int w, int h)
-    {
-        if (!_glReady || w <= 0 || h <= 0) return;
-
-        Gl.glViewport(0, 0, w, h);
+        Gl.glViewport(0, 0, width, height);
         Gl.glMatrixMode(Gl.GL_PROJECTION);
         Gl.glLoadIdentity();
-        double aspect = w / (double)h;
-        const double fov = 45.0 * Math.PI / 180.0, near = 0.5, far = 400.0;
-        double top = near * Math.Tan(fov / 2.0), right = top * aspect;
+        const double fieldOfView = 45.0 * Math.PI / 180.0, near = 0.5, far = 400.0;
+        double top = near * Math.Tan(fieldOfView / 2.0);
+        double right = top * width / height;
         Gl.glFrustum(-right, right, -top, top, near, far);
 
         Gl.glMatrixMode(Gl.GL_MODELVIEW);
         Gl.glLoadIdentity();
-        Gl.glTranslatef(0, 0, -Distance);
-        Gl.glRotatef(Pitch, 1, 0, 0);
-        Gl.glRotatef(Yaw, 0, 1, 0);
-
+        Gl.glTranslatef(0f, 0f, -Distance);
+        Gl.glRotatef(Pitch, 1f, 0f, 0f);
+        Gl.glRotatef(Yaw, 0f, 1f, 0f);
         Gl.glClear(Gl.GL_COLOR_BUFFER_BIT | Gl.GL_DEPTH_BUFFER_BIT);
 
-        ComputeNorm();
-        DrawNodes();
-        if (Ready) DrawEdges();
-        if (Ready) DrawInputDigit();
-        DrawOutputLabels();
-
-        Gl.glFlush();
+        DrawNeurons();
+        if (_hasResult)
+        {
+            DrawConnections(pixelScale);
+            DrawInputDigit();  // over the lines, so the digit stays readable
+        }
+        DrawLabels(pixelScale);
     }
 
-    private void ComputeNorm()
+    private void BuildLayout()
     {
-        int L = _net.sizes.Length;
-
-        if (!Ready)
+        int layers = _positions.Length;
+        for (int l = 0; l < layers; l++)
         {
-            for (int l = 0; l < L; l++)
+            int count = _network.LayerSize(l);
+            int columns;
+            float spacing;
+            if (l == 0)
             {
-                Array.Clear(_norm[l], 0, _norm[l].Length);
+                columns = Dataset.Side;  // the input as a 28×28 image
+                spacing = 0.30f;
+                _radius[l] = 0.055f;
+                _color[l] = new Vector3(0.85f, 0.95f, 1.0f);
             }
-
-            return;
-        }
-
-        for (int l = 0; l < L; l++)
-        {
-            double[] a = _net.A[l], n = _norm[l];
-
-            if (l == 0 || l == L - 1)
+            else if (l == layers - 1)
             {
-                for (int i = 0; i < a.Length; i++)
-                {
-                    n[i] = a[i];
-                }
+                columns = 1;
+                spacing = 1.15f;
+                _radius[l] = 0.30f;
+                _color[l] = new Vector3(0.55f, 1.0f, 0.55f);
             }
             else
             {
-                double max = 1e-6;
-
-                foreach (double t in a)
-                {
-                    if (t > max)
-                    {
-                        max = t;
-                    }
-                }
-
-                for (int i = 0; i < a.Length; i++)
-                {
-                    n[i] = a[i] / max;
-                }
+                columns = (int)Math.Ceiling(Math.Sqrt(count));
+                spacing = 0.95f;
+                _radius[l] = 0.17f;
+                _color[l] = l == 1 ? new Vector3(0.25f, 0.9f, 0.85f) : new Vector3(0.45f, 0.65f, 1.0f);
             }
+
+            float x = -9f + 18f * l / (layers - 1);  // layers spread along x
+            int rows = (count + columns - 1) / columns;
+            _positions[l] = new Vector3[count];
+            for (int i = 0; i < count; i++)
+            {
+                int row = i / columns, column = i % columns;
+                _positions[l][i] = new Vector3(x, ((rows - 1) / 2f - row) * spacing, (column - (columns - 1) / 2f) * spacing);
+            }
+            _allNeurons[l] = [.. Enumerable.Range(0, count)];
+            _levels[l] = new float[count];
         }
     }
 
-    private static float SmoothStep(float a, float b, float x)
+    private static uint BuildSphereList()
     {
-        float t = Math.Clamp((x - a) / (b - a), 0f, 1f);
-        return t * t * (3f - 2f * t);
+        const int stacks = 12, slices = 14;
+        uint list = Gl.glGenLists(1);
+        Gl.glNewList(list, Gl.GL_COMPILE);
+        Gl.glBegin(Gl.GL_TRIANGLES);
+        for (int i = 0; i < stacks; i++)
+        {
+            double lat0 = Math.PI * (-0.5 + (double)i / stacks);
+            double lat1 = Math.PI * (-0.5 + (double)(i + 1) / stacks);
+            for (int j = 0; j < slices; j++)
+            {
+                double lng0 = 2 * Math.PI * j / slices;
+                double lng1 = 2 * Math.PI * (j + 1) / slices;
+                SphereVertex(lng0, lat0); SphereVertex(lng1, lat0); SphereVertex(lng1, lat1);
+                SphereVertex(lng0, lat0); SphereVertex(lng1, lat1); SphereVertex(lng0, lat1);
+            }
+        }
+        Gl.glEnd();
+        Gl.glEndList();
+        return list;
+
+        static void SphereVertex(double longitude, double latitude)
+        {
+            var p = new Vector3(
+                (float)(Math.Cos(longitude) * Math.Cos(latitude)),
+                (float)(Math.Sin(longitude) * Math.Cos(latitude)),
+                (float)Math.Sin(latitude));
+            Gl.glNormal3f(p.X, p.Y, p.Z);  // unit sphere: the normal is the position
+            Gl.glVertex3f(p.X, p.Y, p.Z);
+        }
     }
 
-    private float NodeGate(int layer) => SmoothStep(layer - 0.5f, layer + 0.1f, _wave);
-    private float EdgeGate(int gap) => SmoothStep(gap, gap + 0.8f, _wave);
-
-    private void DrawNodes()
+    private void DrawNeurons()
     {
         Gl.glEnable(Gl.GL_LIGHTING);
-        Gl.glDepthMask(1);
-        int L = _net.sizes.Length;
-
-        for (int l = 0; l < L; l++)
+        Gl.glDepthMask(true);
+        int outputLayer = _positions.Length - 1;
+        for (int l = 0; l < _positions.Length; l++)
         {
-            Vector3[] p = _pos[l];
-            double[] act = _norm[l];
-            float[] baseCol = _color[l];
-            float gate = NodeGate(l);
-
-            for (int i = 0; i < p.Length; i++)
+            float gate = NeuronGate(l);
+            for (int i = 0; i < _positions[l].Length; i++)
             {
-                float a = (float)Math.Clamp(act[i], 0, 1) * gate;
-                bool win = l == L - 1 && i == _winner;
-
-                float cr, cg, cb;
-                if (win)
-                {
-                    cr = 1.0f; 
-                    cg = 0.84f; 
-                    cb = 0.2f;
-                }
-                else
-                {
-                    cr = baseCol[0] * (0.25f + 0.75f * a);
-                    cg = baseCol[1] * (0.25f + 0.75f * a);
-                    cb = baseCol[2] * (0.25f + 0.75f * a);
-                }
-
-                Gl.glColor4f(cr, cg, cb, 1f);
-                float glow = win ? 0.9f : a;
-                _emis[0] = cr * glow; _emis[1] = cg * glow; _emis[2] = cb * glow; _emis[3] = 1f;
-                Gl.glMaterialfv(Gl.GL_FRONT_AND_BACK, Gl.GL_EMISSION, _emis);
-
-                float rad = _radius[l] * (1f + 0.35f * a) * (win ? 1.6f : 1f);
-
-                Gl.glPushMatrix();
-                Gl.glTranslatef(p[i].X, p[i].Y, p[i].Z);
-                Gl.glScalef(rad, rad, rad);
-                Gl.glCallList(_sphereList);
-                Gl.glPopMatrix();
+                float level = Math.Clamp(_levels[l][i], 0f, 1f) * gate;
+                bool winner = l == outputLayer && i == _winner;
+                Vector3 color = winner ? Gold : _color[l] * (0.25f + 0.75f * level);
+                Gl.glColor4f(color.X, color.Y, color.Z, 1f);
+                SetEmission(color * (winner ? 0.9f : level));
+                DrawSphere(_positions[l][i], _radius[l] * (1f + 0.35f * level) * (winner ? 1.6f : 1f));
             }
         }
-
-        Gl.glMaterialfv(Gl.GL_FRONT_AND_BACK, Gl.GL_EMISSION, _zero4);
-    }
-
-    private void DrawEdges()
-    {
-        Gl.glDisable(Gl.GL_LIGHTING);
-        Gl.glEnable(Gl.GL_BLEND);
-        Gl.glBlendFunc(Gl.GL_SRC_ALPHA, Gl.GL_ONE);
-        Gl.glDepthMask(0);
-        Gl.glLineWidth(1.1f);
-
-        int L = _net.sizes.Length;
-        const float kFull = 1.6f, kInput = 1.0f;
-
-        Gl.glBegin(Gl.GL_LINES);
-
-        if (_activePix.Length > 0)
-        {
-            float eg = EdgeGate(0);
-
-            if (eg > 0.01f)
-            {
-                Vector3[] src = _pos[0], dst = _pos[1];
-                double[] aSrc = _norm[0];
-                double[][] w = _net.W[0];
-                for (int j = 0; j < dst.Length; j++)
-                {
-                    double[] wj = w[j];
-                    Vector3 dp = dst[j];
-
-                    foreach (int i in _activePix)
-                    {
-                        float alpha = (float)(Math.Abs(wj[i]) * aSrc[i]) * kInput * eg;
-                        if (alpha < 0.03f) continue;
-                        EmitEdge(src[i], dp, wj[i], alpha);
-                    }
-                }
-            }
-        }
-
-        for (int g = 1; g < L - 1; g++)
-        {
-            float eg = EdgeGate(g);
-            if (eg < 0.01f) continue;
-            Vector3[] src = _pos[g], dst = _pos[g + 1];
-            double[] aSrc = _norm[g];
-            double[][] w = _net.W[g];
-
-            for (int j = 0; j < dst.Length; j++)
-            {
-                double[] wj = w[j];
-                Vector3 dp = dst[j];
-
-                for (int i = 0; i < src.Length; i++)
-                {
-                    float alpha = (float)(Math.Abs(wj[i]) * aSrc[i]) * kFull * eg;
-                    if (alpha < 0.03f) continue;
-                    EmitEdge(src[i], dp, wj[i], alpha);
-                }
-            }
-        }
-
-        Gl.glEnd();
-
-        DrawPulses();
-
-        Gl.glDepthMask(1);
-        Gl.glDisable(Gl.GL_BLEND);
-        Gl.glEnable(Gl.GL_LIGHTING);
-    }
-
-    private static void EmitEdge(Vector3 s, Vector3 d, double weight, float alpha)
-    {
-        if (weight >= 0)
-        {
-            Gl.glColor4f(0.30f, 0.70f, 1.0f, Math.Min(alpha, 0.8f));
-        }
-        else
-        {
-            Gl.glColor4f(1.0f, 0.45f, 0.55f, Math.Min(alpha, 0.8f));
-        }
-
-        Gl.glVertex3f(s.X, s.Y, s.Z);
-        Gl.glVertex3f(d.X, d.Y, d.Z);
-    }
-
-    private void DrawPulses()
-    {
-        if (!_waveRunning) return;
-        int gap = (int)Math.Floor(_wave);
-        int L = _net.sizes.Length;
-        if (gap < 0 || gap >= L - 1) return;
-
-        float t = _wave - gap;
-        float te = SmoothStep(0f, 1f, t);
-        float fade = 1f - Math.Abs(2f * t - 1f);
-
-        Vector3[] src = _pos[gap], dst = _pos[gap + 1];
-        double[] aSrc = _norm[gap];
-        double[][] w = _net.W[gap];
-
-        Gl.glPointSize(7f);
-        Gl.glBegin(Gl.GL_POINTS);
-
-        int drawn = 0;
-        for (int j = 0; j < dst.Length && drawn < 400; j++)
-        {
-            double[] wj = w[j];
-            Vector3 dp = dst[j];
-
-            if (gap == 0)
-            {
-                for (int k = 0; k < _activePix.Length && drawn < 400; k++)
-                {
-                    int i = _activePix[k];
-                    double a = Math.Abs(wj[i]) * aSrc[i];
-                    if (a < 0.25) continue;
-                    EmitPulse(src[i], dp, te, fade);
-                    drawn++;
-                }
-            }
-            else
-            {
-                for (int i = 0; i < src.Length && drawn < 400; i++)
-                {
-                    double a = Math.Abs(wj[i]) * aSrc[i];
-                    if (a < 0.25) continue;
-                    EmitPulse(src[i], dp, te, fade);
-                    drawn++;
-                }
-            }
-        }
-
-        Gl.glEnd();
-    }
-
-    private static void EmitPulse(Vector3 s, Vector3 d, float te, float fade)
-    {
-        Vector3 p = s + (d - s) * te;
-        Gl.glColor4f(1.0f, 1.0f, 0.75f, Math.Min(1f, 0.7f * fade + 0.3f));
-        Gl.glVertex3f(p.X, p.Y, p.Z);
+        SetEmission(Vector3.Zero);
     }
 
     private void DrawInputDigit()
     {
-        float gate = NodeGate(0);
+        float gate = NeuronGate(0);
         if (gate <= 0.01f) return;
 
         Gl.glDisable(Gl.GL_LIGHTING);
-        Gl.glDisable(Gl.GL_BLEND);
-        Gl.glDepthMask(1);
-
-        Vector3[] p = _pos[0];
-        double[] a = _norm[0];
-
-        for (int i = 0; i < p.Length; i++)
+        for (int i = 0; i < _positions[0].Length; i++)
         {
-            float v = (float)Math.Clamp(a[i], 0, 1);
+            float v = Math.Clamp(_levels[0][i], 0f, 1f);
             if (v < 0.12f) continue;
-            float b = (0.35f + 0.65f * v) * gate;
-            Gl.glColor4f(1.0f * b, 0.97f * b, 0.82f * b, 1f);
-            float rad = _radius[0] * (2.2f + 1.8f * v);
-            Gl.glPushMatrix();
-            Gl.glTranslatef(p[i].X, p[i].Y, p[i].Z);
-            Gl.glScalef(rad, rad, rad);
-            Gl.glCallList(_sphereList);
-            Gl.glPopMatrix();
+            float brightness = (0.35f + 0.65f * v) * gate;
+            Gl.glColor4f(brightness, 0.97f * brightness, 0.82f * brightness, 1f);
+            DrawSphere(_positions[0][i], _radius[0] * (2.2f + 1.8f * v));
         }
         Gl.glEnable(Gl.GL_LIGHTING);
     }
 
-    private void DrawOutputLabels()
+    private void DrawConnections(float pixelScale)
     {
-        int L = _net.sizes.Length;
-        Vector3[] outPos = _pos[L - 1];
-        double[] probs = _net.A[L - 1];
-
-        Gl.glDisable(Gl.GL_LIGHTING);
-        Gl.glEnable(Gl.GL_BLEND);
-        Gl.glBlendFunc(Gl.GL_SRC_ALPHA, Gl.GL_ONE);
-        Gl.glDepthMask(0);
-
-        int count = Math.Min(outPos.Length, 10);
-        for (int d = 0; d < count; d++)
-        {
-            bool win = d == _winner;
-            float prob = Ready ? (float)Math.Clamp(probs[d], 0, 1) : 0f;
-            float scale = win ? 0.95f : 0.62f;
-            float bright = win ? 1f : 0.45f + 0.55f * prob;
-
-            float gh = 0.9f * scale;
-            float ox = outPos[d].X + 0.75f;
-            float oy = outPos[d].Y - gh / 2f;
-            float oz = outPos[d].Z;
-
-            float r, g, b;
-            if (win) { r = 1f; g = 0.84f; b = 0.2f; }
-            else { r = 0.55f * bright; g = 0.85f * bright; b = 1.0f * bright; }
-
-            Gl.glLineWidth(win ? 3.0f : 2.0f);
-            DrawGlyph(d, ox, oy, oz, scale, r, g, b);
-        }
-
-        Gl.glDepthMask(1);
-        Gl.glDisable(Gl.GL_BLEND);
-        Gl.glEnable(Gl.GL_LIGHTING);
-    }
-
-    private static void DrawGlyph(int digit, float ox, float oy, float oz, float scale, float r, float g, float b)
-    {
-        float w = 0.55f * scale, h = 0.9f * scale, m = h / 2f;
-        string s = SegOn[digit];
-
-        Gl.glColor4f(r, g, b, 0.95f);
+        BeginAdditive();
+        Gl.glLineWidth(1.1f * pixelScale);
         Gl.glBegin(Gl.GL_LINES);
-
-        void Seg(float x0, float y0, float x1, float y1)
+        for (int l = 0; l < _positions.Length - 1; l++)
         {
-            Gl.glVertex3f(ox + x0, oy + y0, oz);
-            Gl.glVertex3f(ox + x1, oy + y1, oz);
+            float gate = ConnectionGate(l);
+            if (gate < 0.01f) continue;
+            float strength = (l == 0 ? 1.0f : 1.6f) * gate;
+            int[] sources = Sources(l);
+            for (int j = 0; j < _positions[l + 1].Length; j++)
+                foreach (int i in sources)
+                {
+                    float weight = _network.Weight(l, i, j);
+                    float alpha = MathF.Abs(weight) * _levels[l][i] * strength;
+                    if (alpha < 0.03f) continue;
+                    Vector3 color = weight >= 0f ? PositiveColor : NegativeColor;
+                    Gl.glColor4f(color.X, color.Y, color.Z, MathF.Min(alpha, 0.8f));
+                    Vertex(_positions[l][i]);
+                    Vertex(_positions[l + 1][j]);
+                }
         }
+        Gl.glEnd();
+        DrawPulses(pixelScale);
+        EndAdditive();
+    }
 
-        if (s[0] == '1') Seg(0, h, w, h);
-        if (s[1] == '1') Seg(w, h, w, m);
-        if (s[2] == '1') Seg(w, m, w, 0);
-        if (s[3] == '1') Seg(0, 0, w, 0);
-        if (s[4] == '1') Seg(0, m, 0, 0);
-        if (s[5] == '1') Seg(0, h, 0, m);
-        if (s[6] == '1') Seg(0, m, w, m);
+    // Sparks travelling along the strongest connections of the layer gap the wave is in.
+    private void DrawPulses(float pixelScale)
+    {
+        if (!_waveRunning) return;
+        int gap = (int)MathF.Floor(_wave);
+        if (gap < 0 || gap >= _positions.Length - 1) return;
 
+        float t = _wave - gap;
+        float travel = SmoothStep(0f, 1f, t);
+        float fade = 1f - MathF.Abs(2f * t - 1f);
+        int[] sources = Sources(gap);
+
+        Gl.glPointSize(7f * pixelScale);
+        Gl.glColor4f(1.0f, 1.0f, 0.75f, MathF.Min(1f, 0.7f * fade + 0.3f));
+        Gl.glBegin(Gl.GL_POINTS);
+        int drawn = 0;
+        for (int j = 0; j < _positions[gap + 1].Length && drawn < MaxPulses; j++)
+            foreach (int i in sources)
+            {
+                if (MathF.Abs(_network.Weight(gap, i, j)) * _levels[gap][i] < 0.25f) continue;
+                Vertex(Vector3.Lerp(_positions[gap][i], _positions[gap + 1][j], travel));
+                if (++drawn == MaxPulses) break;
+            }
         Gl.glEnd();
     }
+
+    private void DrawLabels(float pixelScale)
+    {
+        BeginAdditive();
+        // Glyphs lie in the camera's plane, so they stay readable from any angle, and sit
+        // on the outer side of the output layer as seen from the camera.
+        (Vector3 right, Vector3 up) = CameraAxes();
+        bool outerSideIsRight = right.X >= 0f;
+        Vector3[] outputs = _positions[^1];
+        float[] probabilities = _levels[^1];
+        for (int digit = 0; digit < Math.Min(outputs.Length, DigitSegments.Length); digit++)
+        {
+            bool winner = digit == _winner;
+            float scale = winner ? 0.95f : 0.62f;
+            float brightness = 0.45f + 0.55f * Math.Clamp(probabilities[digit], 0f, 1f);
+            Vector3 color = winner ? Gold : LabelColor * brightness;
+            float width = 0.55f * scale, height = 0.9f * scale;
+            Vector3 offset = outerSideIsRight ? right * 0.75f : -right * (0.75f + width);
+            Vector3 origin = outputs[digit] + offset - up * (height / 2f);
+
+            Gl.glLineWidth((winner ? 3f : 2f) * pixelScale);
+            Gl.glColor4f(color.X, color.Y, color.Z, 0.95f);
+            Gl.glBegin(Gl.GL_LINES);
+            for (int s = 0; s < SegmentLines.Length; s++)
+            {
+                if ((DigitSegments[digit] >> (SegmentLines.Length - 1 - s) & 1) == 0) continue;
+                (float x0, float y0, float x1, float y1) = SegmentLines[s];
+                Vertex(origin + right * (x0 * width) + up * (y0 * height));
+                Vertex(origin + right * (x1 * width) + up * (y1 * height));
+            }
+            Gl.glEnd();
+        }
+        EndAdditive();
+    }
+
+    // Camera right and up axes in world space, from the rotations used in Render.
+    private (Vector3 Right, Vector3 Up) CameraAxes()
+    {
+        float yaw = Yaw * MathF.PI / 180f, pitch = Pitch * MathF.PI / 180f;
+        var right = new Vector3(MathF.Cos(yaw), 0f, MathF.Sin(yaw));
+        var up = new Vector3(MathF.Sin(pitch) * MathF.Sin(yaw), MathF.Cos(pitch), -MathF.Sin(pitch) * MathF.Cos(yaw));
+        return (right, up);
+    }
+
+    // Input pixels: only the brightest ones, or the picture drowns in lines.
+    private int[] Sources(int layer) => layer == 0 ? _activeInputs : _allNeurons[layer];
+
+    private float NeuronGate(int layer) => SmoothStep(layer - 0.5f, layer + 0.1f, _wave);
+
+    private float ConnectionGate(int gap) => SmoothStep(gap, gap + 0.8f, _wave);
+
+    private static float SmoothStep(float edge0, float edge1, float x)
+    {
+        float t = Math.Clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
+        return t * t * (3f - 2f * t);
+    }
+
+    private static void BeginAdditive()
+    {
+        Gl.glDisable(Gl.GL_LIGHTING);
+        Gl.glEnable(Gl.GL_BLEND);
+        Gl.glBlendFunc(Gl.GL_SRC_ALPHA, Gl.GL_ONE);  // overlapping lines add up to a glow
+        Gl.glDepthMask(false);
+    }
+
+    private static void EndAdditive()
+    {
+        Gl.glDepthMask(true);
+        Gl.glDisable(Gl.GL_BLEND);
+        Gl.glEnable(Gl.GL_LIGHTING);
+    }
+
+    private void DrawSphere(Vector3 centre, float radius)
+    {
+        Gl.glPushMatrix();
+        Gl.glTranslatef(centre.X, centre.Y, centre.Z);
+        Gl.glScalef(radius, radius, radius);
+        Gl.glCallList(_sphereList);
+        Gl.glPopMatrix();
+    }
+
+    private void SetEmission(Vector3 color)
+    {
+        _emission[0] = color.X;
+        _emission[1] = color.Y;
+        _emission[2] = color.Z;
+        _emission[3] = 1f;
+        Gl.glMaterialfv(Gl.GL_FRONT_AND_BACK, Gl.GL_EMISSION, _emission);
+    }
+
+    private static void Vertex(Vector3 p) => Gl.glVertex3f(p.X, p.Y, p.Z);
 }

@@ -1,71 +1,90 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 
 namespace Makarov.NeuralNet3D;
 
+// MNIST in the original IDX format, fetched once from a GitHub mirror and cached.
 internal static class MnistLoader
 {
     private const string BaseUrl = "https://raw.githubusercontent.com/fgnt/mnist/master/";
+    private const string TrainImages = "train-images-idx3-ubyte.gz";
+    private const string TrainLabels = "train-labels-idx1-ubyte.gz";
+    private const string TestImages = "t10k-images-idx3-ubyte.gz";
+    private const string TestLabels = "t10k-labels-idx1-ubyte.gz";
+    private const int ImagesMagic = 0x803;  // unsigned bytes, 3 dimensions
+    private const int LabelsMagic = 0x801;  // unsigned bytes, 1 dimension
+    private static readonly string[] Files = [TrainImages, TrainLabels, TestImages, TestLabels];
 
-    private static readonly string[] FileNames =
+    public static async Task DownloadAsync(string directory, IProgress<string>? progress, CancellationToken cancellationToken)
     {
-        "train-images-idx3-ubyte.gz", "train-labels-idx1-ubyte.gz",
-        "t10k-images-idx3-ubyte.gz",  "t10k-labels-idx1-ubyte.gz"
-    };
-
-    public static void EnsureDownloaded(string dir, Action<string> status = null)
-    {
-        Directory.CreateDirectory(dir);
+        Directory.CreateDirectory(directory);
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-
-        foreach (string f in FileNames)
+        foreach (string file in Files)
         {
-            string path = Path.Combine(dir, f);
-            if (File.Exists(path) && new FileInfo(path).Length > 1000) continue;
+            string path = Path.Combine(directory, file);
+            if (File.Exists(path)) continue;
 
-            status?.Invoke($"Downloading {f} …");
-            byte[] bytes = http.GetByteArrayAsync(BaseUrl + f).GetAwaiter().GetResult();
-            File.WriteAllBytes(path, bytes);
+            progress?.Report($"Downloading {file} …");
+            string partial = path + ".part";
+            using (HttpResponseMessage response = await http
+                       .GetAsync(BaseUrl + file, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                       .ConfigureAwait(false))
+            {
+                response.EnsureSuccessStatusCode();
+                await using FileStream target = File.Create(partial);
+                await response.Content.CopyToAsync(target, cancellationToken).ConfigureAwait(false);
+            }
+            // Only a complete download gets the final name, so an interrupted one is fetched again.
+            File.Move(partial, path, overwrite: true);
         }
     }
 
-    public static List<(double[] x, int y)> Load(string dir, bool test)
+    // Throws InvalidDataException if the cached files are damaged.
+    public static Dataset Load(string directory, bool test)
     {
-        string imgPath = Path.Combine(dir, test ? "t10k-images-idx3-ubyte.gz" : "train-images-idx3-ubyte.gz");
-        string lblPath = Path.Combine(dir, test ? "t10k-labels-idx1-ubyte.gz" : "train-labels-idx1-ubyte.gz");
+        byte[] pixels = ReadIdx(Path.Combine(directory, test ? TestImages : TrainImages), ImagesMagic, Dataset.PixelCount);
+        byte[] labels = ReadIdx(Path.Combine(directory, test ? TestLabels : TrainLabels), LabelsMagic, 1);
+        if (pixels.Length != labels.Length * Dataset.PixelCount)
+            throw new InvalidDataException("MNIST image and label files do not match.");
+        if (labels.AsSpan().IndexOfAnyInRange((byte)10, byte.MaxValue) >= 0)
+            throw new InvalidDataException("Bad MNIST label.");
+        return new Dataset(pixels, labels);
+    }
 
-        byte[] images = Decompress(imgPath);
-        byte[] labels = Decompress(lblPath);
+    // Removes the cached files, so the next start downloads them again.
+    public static void DeleteCache(string directory)
+    {
+        if (!Directory.Exists(directory)) return;
+        foreach (string file in Files)
+            File.Delete(Path.Combine(directory, file));
+    }
 
-        if (ReadBE(images, 0) != 0x803) throw new InvalidDataException("Bad MNIST image magic");
-        if (ReadBE(labels, 0) != 0x801) throw new InvalidDataException("Bad MNIST label magic");
-
-        int n = ReadBE(images, 4);
-        int rows = ReadBE(images, 8), cols = ReadBE(images, 12);
-        int nl = ReadBE(labels, 4);
-        if (n != nl) throw new InvalidDataException("MNIST count mismatch");
-
-        int stride = rows * cols;
-        const int imgHeader = 16, lblHeader = 8;
-
-        var list = new List<(double[], int)>(n);
-        for (int s = 0; s < n; s++)
+    // Gzipped IDX file: big-endian magic (its low byte is the number of dimensions), the
+    // size of each dimension, then the data. Decompressed straight into the result.
+    private static byte[] ReadIdx(string path, int magic, int itemSize)
+    {
+        using var gzip = new GZipStream(File.OpenRead(path), CompressionMode.Decompress);
+        try
         {
-            var x = new double[stride];
-            int off = imgHeader + s * stride;
-            for (int i = 0; i < stride; i++) x[i] = images[off + i] / 255.0;
-            list.Add((x, labels[lblHeader + s]));
+            Span<byte> header = stackalloc byte[4 * (1 + (magic & 0xFF))];
+            gzip.ReadExactly(header);
+            if (ReadInt32(header, 0) != magic)
+                throw new InvalidDataException($"{Path.GetFileName(path)} is not the expected MNIST file.");
+            if (itemSize > 1 && (ReadInt32(header, 8) != Dataset.Side || ReadInt32(header, 12) != Dataset.Side))
+                throw new InvalidDataException("MNIST images are not 28×28.");
+            int count = ReadInt32(header, 4);
+            if (count is <= 0 or > 100_000)
+                throw new InvalidDataException($"{Path.GetFileName(path)} has a bad item count.");
+
+            var data = new byte[count * itemSize];
+            gzip.ReadExactly(data);
+            return data;
         }
-        return list;
+        catch (EndOfStreamException)
+        {
+            throw new InvalidDataException($"{Path.GetFileName(path)} is truncated.");
+        }
     }
 
-    private static byte[] Decompress(string path)
-    {
-        using var fs = File.OpenRead(path);
-        using var gz = new GZipStream(fs, CompressionMode.Decompress);
-        using var ms = new MemoryStream();
-        gz.CopyTo(ms);
-        return ms.ToArray();
-    }
-
-    private static int ReadBE(byte[] b, int o) => (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
+    private static int ReadInt32(ReadOnlySpan<byte> data, int offset) => BinaryPrimitives.ReadInt32BigEndian(data[offset..]);
 }

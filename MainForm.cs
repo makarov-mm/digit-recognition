@@ -1,313 +1,247 @@
 using System.Diagnostics;
+using System.Globalization;
 
-namespace Makarov.NeuralNet3D
+namespace Makarov.NeuralNet3D;
+
+// Left: a canvas to draw a digit on, the recognised digit and the probability of each.
+// Right: the network in 3D, lighting up as the digit passes through it.
+internal sealed class MainForm : Form
 {
-    internal sealed class MainForm : Form
+    private const string NoDigit = "—";
+
+    private static readonly string DataDirectory =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NeuralNet3D");
+
+    private readonly NeuralNetwork _network = new(Dataset.PixelCount, 64, 32, 10);
+    private readonly NetworkRenderer _renderer;
+    private readonly DrawingPanel _canvas;
+    private readonly Button _recognizeButton;
+    private readonly Label _digitLabel;
+    private readonly ResultBars _bars;
+    private readonly Label _statusLabel;
+    private readonly GlControl _view;
+    private readonly Font _titleFont = new("Segoe UI", 11f, FontStyle.Bold);
+    private readonly Font _resultFont = new("Segoe UI", 10f);
+    private readonly Font _digitFont = new("Segoe UI", 56f, FontStyle.Bold);
+    private readonly System.Windows.Forms.Timer _timer = new() { Interval = 16 };
+    private readonly Stopwatch _clock = new();
+    private readonly CancellationTokenSource _closing = new();
+    private bool _ready;
+    private bool _dragging;
+    private Point _lastMouse;
+
+    public MainForm()
     {
-        private static readonly string AppDir = AppContext.BaseDirectory;
-        private static readonly string WeightsPath = Path.Combine(AppDir, "weights.bin");
+        _renderer = new NetworkRenderer(_network);
 
-        private readonly NeuralNetwork _net;
-        private readonly NetworkRenderer _renderer;
-        private readonly DrawingPanel _drawing;
-        private readonly ResultBars _bars;
-        private readonly GlControl _gl;
-        private readonly Button _btnClear;
-        private readonly Button _btnRecognize;
-        private readonly Label _bigDigit;
-        private readonly Label _status;
-        private readonly System.Windows.Forms.Timer _timer;
-        private readonly Stopwatch _clock = new();
-        private bool _dragging;
-        private Point _lastMouse;
-        private volatile bool _ready;
+        SuspendLayout();
+        // Coordinates below are 96-DPI pixels; WinForms scales them to the monitor.
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        Text = "Digit Recognition";
+        BackColor = Color.FromArgb(24, 24, 28);
+        ForeColor = Color.Gainsboro;
+        ClientSize = new Size(1184, 761);
+        MinimumSize = new Size(900, 600);
+        StartPosition = FormStartPosition.CenterScreen;
 
-        public MainForm()
+        var title = new Label
         {
-            _net = new NeuralNetwork(784, 64, 32, 10);
-            _renderer = new NetworkRenderer(_net);
+            Text = "Draw a digit (0–9)",
+            Dock = DockStyle.Top,
+            Height = 28,
+            Font = _titleFont,
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+        _canvas = new DrawingPanel { Location = new Point(16, 52), Size = new Size(300, 300), BackColor = Color.White };
+        Button clearButton = CreateButton("Clear", new Point(16, 362), Color.FromArgb(54, 54, 64), Color.Gainsboro);
+        _recognizeButton = CreateButton("Recognize", new Point(174, 362), Color.FromArgb(58, 84, 140), Color.White);
+        _recognizeButton.Enabled = false;
+        var resultLabel = new Label { Text = "Result:", Location = new Point(16, 410), AutoSize = true, Font = _resultFont };
+        _digitLabel = new Label
+        {
+            Text = NoDigit,
+            Location = new Point(150, 404),
+            Size = new Size(166, 86),
+            Font = _digitFont,
+            ForeColor = Color.Gold,
+            TextAlign = ContentAlignment.MiddleCenter,
+        };
+        _bars = new ResultBars { Location = new Point(16, 498), Size = new Size(300, 200), BackColor = Color.FromArgb(30, 30, 36) };
+        _statusLabel = new Label
+        {
+            Text = "Initializing…",
+            Dock = DockStyle.Bottom,
+            Height = 24,
+            ForeColor = Color.DarkGray,
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
 
-            Text = "Digit Recognition";
-            BackColor = Color.FromArgb(24, 24, 28);
-            ForeColor = Color.Gainsboro;
-            Width = 1200;
-            Height = 800;
-            StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(900, 600);
+        var leftPanel = new Panel
+        {
+            Dock = DockStyle.Left,
+            Width = 340,
+            BackColor = Color.FromArgb(30, 30, 36),
+            Padding = new Padding(16),
+        };
+        leftPanel.Controls.AddRange([_bars, _digitLabel, resultLabel, _recognizeButton, clearButton, _canvas, title, _statusLabel]);
 
-            var left = new Panel
-            {
-                Dock = DockStyle.Left,
-                Width = 340,
-                BackColor = Color.FromArgb(30, 30, 36),
-                Padding = new Padding(16)
-            };
+        _view = new GlControl { Dock = DockStyle.Fill };
+        Controls.Add(_view);  // added first: it fills what the left panel leaves
+        Controls.Add(leftPanel);
+        CancelButton = clearButton;  // Esc clears the canvas
+        ResumeLayout(false);
+        PerformLayout();
 
-            var title = new Label
-            {
-                Text = "Draw a digit (0–9)",
-                Dock = DockStyle.Top,
-                Height = 28,
-                Font = new Font("Segoe UI", 11f, FontStyle.Bold),
-                TextAlign = ContentAlignment.MiddleLeft
-            };
+        _canvas.StrokeEnded += Recognize;
+        clearButton.Click += (_, _) => ClearDrawing();
+        _recognizeButton.Click += (_, _) => Recognize();
 
-            _drawing = new DrawingPanel
-            {
-                Location = new Point(16, 52),
-                Size = new Size(300, 300),
-                BackColor = Color.White
-            };
-            _drawing.StrokeEnded += () => Recognize();
+        _view.ContextCreated += _renderer.InitGl;
+        _view.RenderFrame += (width, height) => _renderer.Render(width, height, _view.DeviceDpi / 96f);
+        _view.MouseEnter += (_, _) => _view.Focus();  // so the wheel reaches it
+        _view.MouseDown += OnViewMouseDown;
+        _view.MouseMove += OnViewMouseMove;
+        _view.MouseUp += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left) _dragging = false;
+        };
+        _view.MouseCaptureChanged += (_, _) => _dragging = false;
+        _view.MouseDoubleClick += (_, _) => _renderer.AutoRotate = true;
+        _view.MouseWheel += (_, e) => _renderer.Zoom(e.Delta * 0.01f);
 
-            _drawing.MouseDown += (_, __) =>
-            {
-                _drawing.Clear();
-            };
+        _timer.Tick += OnTick;
+    }
 
-            _btnClear = new Button
-            {
-                Text = "Clear",
-                Location = new Point(16, 362),
-                Size = new Size(142, 34),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(54, 54, 64),
-                ForeColor = Color.Gainsboro
-            };
-
-            _btnClear.Click += (_, __) =>
-            {
-                _drawing.Clear();
-            };
-
-            _btnRecognize = new Button
-            {
-                Text = "Recognize",
-                Location = new Point(174, 362),
-                Size = new Size(142, 34),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(58, 84, 140),
-                ForeColor = Color.White,
-                Enabled = false
-            };
-            _btnRecognize.Click += (_, __) => Recognize();
-
-            var lblResult = new Label
-            {
-                Text = "Result:",
-                Location = new Point(16, 410),
-                AutoSize = true,
-                Font = new Font("Segoe UI", 10f)
-            };
-
-            _bigDigit = new Label
-            {
-                Text = "—",
-                Location = new Point(150, 404),
-                Size = new Size(166, 86),
-                Font = new Font("Segoe UI", 56f, FontStyle.Bold),
-                ForeColor = Color.Gold,
-                TextAlign = ContentAlignment.MiddleCenter
-            };
-
-            _bars = new ResultBars
-            {
-                Location = new Point(16, 498),
-                Size = new Size(300, 200),
-                BackColor = Color.FromArgb(30, 30, 36)
-            };
-
-            _status = new Label
-            {
-                Dock = DockStyle.Bottom,
-                Height = 24,
-                Text = "Initializing…",
-                ForeColor = Color.DarkGray,
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-
-            left.Controls.Add(_bars);
-            left.Controls.Add(_bigDigit);
-            left.Controls.Add(lblResult);
-            left.Controls.Add(_btnRecognize);
-            left.Controls.Add(_btnClear);
-            left.Controls.Add(_drawing);
-            left.Controls.Add(title);
-            left.Controls.Add(_status);
-
-            _gl = new GlControl { Dock = DockStyle.Fill };
-            _gl.GlInit += _renderer.InitGl;
-            _gl.GlRender += (w, h) => _renderer.Render(w, h);
-
-            _gl.MouseEnter += (_, __) => { if (_gl.CanFocus) _gl.Focus(); };
-            _gl.MouseDown += (_, e) =>
-            {
-                if (e.Button == MouseButtons.Left)
-                {
-                    _dragging = true;
-                    _lastMouse = e.Location;
-                    _renderer.AutoRotate = false;
-                }
-            };
-            _gl.MouseMove += (_, e) =>
-            {
-                if (!_dragging) return;
-                _renderer.Yaw += (e.X - _lastMouse.X) * 0.4f;
-                _renderer.Pitch += (e.Y - _lastMouse.Y) * 0.4f;
-                if (_renderer.Pitch > 89f) _renderer.Pitch = 89f;
-                if (_renderer.Pitch < -89f) _renderer.Pitch = -89f;
-                _lastMouse = e.Location;
-            };
-            _gl.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) _dragging = false; };
-            _gl.MouseDoubleClick += (_, __) => _renderer.AutoRotate = !_renderer.AutoRotate;
-            _gl.MouseWheel += (_, e) =>
-            {
-                _renderer.Distance -= e.Delta * 0.01f;
-                if (_renderer.Distance < 12f) _renderer.Distance = 12f;
-                if (_renderer.Distance > 70f) _renderer.Distance = 70f;
-            };
-
-            Controls.Add(_gl);
-            Controls.Add(left);
-
-            _timer = new System.Windows.Forms.Timer { Interval = 16 };
-            _timer.Tick += (_, __) =>
-            {
-                double dt = _clock.Elapsed.TotalSeconds;
-                _clock.Restart();
-                _renderer.Update(dt);
-                _gl.Invalidate();
-            };
-
-            Load += (_, __) =>
-            {
-                _clock.Start();
-                _timer.Start();
-                StartTraining();
-            };
-
-            KeyUp += (object? sender, KeyEventArgs args) =>
-            {
-                if (args.KeyCode == Keys.Escape)
-                {
-                    _drawing.Clear();
-                }
-            };
+    protected override async void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        // Scaled for a high-DPI monitor, the design size can exceed a small screen.
+        Rectangle area = Screen.FromControl(this).WorkingArea;
+        if (Width > area.Width || Height > area.Height)
+        {
+            Size = new Size(Math.Min(Width, area.Width), Math.Min(Height, area.Height));
+            CenterToScreen();
         }
 
-        private void StartTraining()
+        _clock.Start();
+        _timer.Start();
+        await PrepareNetworkAsync();
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        _closing.Cancel();  // stops a download or training still in progress
+        _timer.Stop();
+        base.OnFormClosed(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
         {
-            Task.Run(() =>
-            {
-                try
-                {
-                    if (File.Exists(WeightsPath) && _net.TryLoad(WeightsPath))
-                    {
-                        SetStatus("Loaded cached weights.");
-                    }
-                    else
-                    {
-                        List<(double[] x, int y)> train, test = null;
-                        bool real = false;
+            _timer.Dispose();
+            _closing.Dispose();
+            _titleFont.Dispose();
+            _resultFont.Dispose();
+            _digitFont.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 
-                        try
-                        {
-                            SetStatus("Downloading MNIST …");
-                            MnistLoader.EnsureDownloaded("mnist", SetStatus);
-                            SetStatus("Loading MNIST …");
-                            train = MnistLoader.Load("mnist", test: false);
-                            test = MnistLoader.Load("mnist", test: true);
-                            real = true;
-                        }
-                        catch (Exception ex)
-                        {
-                            SetStatus("MNIST unavailable (" + ex.Message + ") — using synthetic data.");
-                            const int perDigit = 350;
-                            int total = perDigit * 10;
-                            train = ImageOps.GenerateDataset(perDigit,
-                                done => SetStatus($"Generating dataset … {done}/{total}"));
-                        }
+    private static Button CreateButton(string text, Point location, Color background, Color foreground) => new()
+    {
+        Text = text,
+        Location = location,
+        Size = new Size(142, 34),
+        FlatStyle = FlatStyle.Flat,
+        BackColor = background,
+        ForeColor = foreground,
+    };
 
-                        var rng = new Random(12345);
-                        int epochs = real ? 15 : 14;
-                        double lr = 0.05;
-
-                        for (int ep = 0; ep < epochs; ep++)
-                        {
-                            for (int i = train.Count - 1; i > 0; i--)
-                            {
-                                int j = rng.Next(i + 1);
-                                (train[i], train[j]) = (train[j], train[i]);
-                            }
-
-                            double loss = 0;
-                            foreach (var (x, y) in train)
-                                loss += _net.TrainSample(x, y, lr, labelSmoothing: 0.05);
-                            loss /= train.Count;
-
-                            SetStatus($"Training … epoch {ep + 1}/{epochs}, loss={loss:F3}");
-                            lr *= 0.93;
-                        }
-
-                        if (real && test != null)
-                        {
-                            int correct = 0;
-                            foreach (var (x, y) in test)
-                                if (_net.Predict(x) == y) correct++;
-                            double acc = 100.0 * correct / test.Count;
-                            SetStatus($"Trained on MNIST — test accuracy {acc:F1}%.");
-                        }
-
-                        try { _net.Save(WeightsPath); } catch { }
-                    }
-
-                    BeginInvoke(() =>
-                    {
-                        _ready = true;
-                        _renderer.Ready = true;
-                        _btnRecognize.Enabled = true;
-                        if (!_status.Text.StartsWith("Trained") && !_status.Text.StartsWith("Loaded"))
-                            _status.Text = "Ready. Draw a digit.";
-                        else
-                            _status.Text += "  Draw a digit.";
-                    });
-                }
-                catch (Exception ex)
-                {
-                    SetStatus("Training error: " + ex.Message);
-                }
-            });
+    // Loads or trains the network in the background, reporting progress in the status bar.
+    private async Task PrepareNetworkAsync()
+    {
+        var progress = new Progress<string>(text =>
+        {
+            if (!IsDisposed) _statusLabel.Text = text;
+        });
+        string summary;
+        try
+        {
+            summary = await Task.Run(() => Training.PrepareAsync(_network, DataDirectory, progress, _closing.Token));
+        }
+        catch (OperationCanceledException) when (_closing.IsCancellationRequested)
+        {
+            return;  // the window was closed
+        }
+        catch (Exception ex)
+        {
+            _statusLabel.Text = "Training failed: " + ex.Message;
+            return;
         }
 
-        private void SetStatus(string text)
+        _ready = true;
+        _recognizeButton.Enabled = true;
+        _statusLabel.Text = summary + "  Draw a digit.";
+        if (_canvas.HasInk) Recognize();  // drawn while the network was still training
+    }
+
+    private void Recognize()
+    {
+        if (!_ready) return;
+        if (!_canvas.HasInk)
         {
-            if (IsHandleCreated)
-                BeginInvoke(() => _status.Text = text);
+            ShowNoResult();
+            return;
         }
 
-        private void Recognize()
-        {
-            if (!_ready) return;
+        float[] input;
+        using (Bitmap snapshot = _canvas.Snapshot())
+            input = DigitPreprocessor.FromBitmap(snapshot);
+        ReadOnlySpan<float> probabilities = _network.Forward(input);
+        int digit = NeuralNetwork.ArgMax(probabilities);
 
-            using var snap = _drawing.Snapshot();
-            double[] x = ImageOps.Preprocess(snap);
-            double[] probs = _net.Forward(x);
+        _digitLabel.Text = digit.ToString(CultureInfo.InvariantCulture);
+        _bars.SetValues(probabilities, digit);
+        _renderer.ShowResult(digit);
+    }
 
-            int winner = 0;
-            for (int i = 1; i < probs.Length; i++)
-                if (probs[i] > probs[winner]) winner = i;
+    private void ClearDrawing()
+    {
+        _canvas.Clear();
+        ShowNoResult();
+    }
 
-            _bigDigit.Text = winner.ToString();
-            _bars.SetValues(probs, winner);
+    private void ShowNoResult()
+    {
+        _digitLabel.Text = NoDigit;
+        _bars.Clear();
+        _renderer.ClearResult();
+    }
 
-            _renderer.SetResult(probs, winner);
-            _renderer.StartWave();
-        }
+    private void OnViewMouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        _dragging = true;
+        _lastMouse = e.Location;
+        _renderer.AutoRotate = false;
+    }
 
-        protected override void OnFormClosed(FormClosedEventArgs e)
-        {
-            _timer.Stop();
-            base.OnFormClosed(e);
-        }
+    private void OnViewMouseMove(object? sender, MouseEventArgs e)
+    {
+        if (!_dragging) return;
+        float degreesPerPixel = 0.4f * 96f / _view.DeviceDpi;
+        _renderer.Rotate((e.X - _lastMouse.X) * degreesPerPixel, (e.Y - _lastMouse.Y) * degreesPerPixel);
+        _lastMouse = e.Location;
+    }
+
+    private void OnTick(object? sender, EventArgs e)
+    {
+        double seconds = _clock.Elapsed.TotalSeconds;
+        _clock.Restart();
+        _renderer.Update(seconds);
+        if (WindowState != FormWindowState.Minimized)
+            _view.Invalidate();
     }
 }
